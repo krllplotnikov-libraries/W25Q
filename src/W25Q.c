@@ -1,4 +1,4 @@
-#include "W25Qxx.h"
+#include "W25Q.h"
 
 #define W25QXX_DUMMY_BYTE        0xA5
 
