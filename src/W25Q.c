@@ -1,497 +1,410 @@
 #include "W25Q.h"
 
-#define W25QXX_DUMMY_BYTE        0xA5
+//-----Data-----
+#define W25Q_COMMAND_WRITE_ENABLE       0x06u
+#define W25Q_COMMAND_READ_STATUS_1      0x05u
+#define W25Q_COMMAND_READ_STATUS_3      0x15u
+#define W25Q_COMMAND_PAGE_PROGRAM       0x02u
+#define W25Q_COMMAND_FAST_READ          0x0Bu
+#define W25Q_COMMAND_SECTOR_ERASE       0x20u
+#define W25Q_COMMAND_BLOCK_ERASE        0xD8u
+#define W25Q_COMMAND_CHIP_ERASE         0xC7u
+#define W25Q_COMMAND_JEDEC_ID           0x9Fu
+#define W25Q_COMMAND_UNIQUE_ID          0x4Bu
+#define W25Q_COMMAND_RELEASE_POWER_DOWN 0xABu
+#define W25Q_COMMAND_ENTER_4_BYTE_MODE  0xB7u
 
-static void W25Q_Delay(W25Q_st* w25q, uint32_t ms){
-	uint32_t startTime = w25q->descriptor.getTick();
-	while(startTime + ms > w25q->descriptor.getTick()){}
-}
+#define W25Q_STATUS_1_BUSY              0x01u
+#define W25Q_STATUS_3_ADS               0x01u
 
-static uint8_t W25Q_SendByte(W25Q_st* w25q, uint8_t byte)
-{
-	uint8_t rxByte = 0;
-	w25q->descriptor.spiTransmitReceive(w25q, &byte, &rxByte, 1);
-	return rxByte;
-}
+#define W25Q_JEDEC_MANUFACTURER_WINBOND 0xEFu
+#define W25Q_JEDEC_TYPE_SPI             0x40u
+#define W25Q_JEDEC_TYPE_SPI_1V8         0x60u
+#define W25Q_JEDEC_TYPE_SPI_DTR         0x70u
+#define W25Q_JEDEC_CAPACITY_W25Q10      0x11u
+#define W25Q_JEDEC_CAPACITY_W25Q256     0x19u
+#define W25Q_JEDEC_CAPACITY_W25Q512     0x20u
 
-static uint32_t W25Q_ReadID(W25Q_st* w25q)
-{
-	uint32_t id = 0;
-	uint8_t rxByte0 = 0, rxByte1 = 0, rxByte2 = 0;
-
-	w25q->descriptor.spiChipSelect(w25q, 0);
-
-	W25Q_SendByte(w25q, W25_GET_JEDEC_ID);
-
-	rxByte0 = W25Q_SendByte(w25q, W25QXX_DUMMY_BYTE);
-	rxByte1 = W25Q_SendByte(w25q, W25QXX_DUMMY_BYTE);
-	rxByte2 = W25Q_SendByte(w25q, W25QXX_DUMMY_BYTE);
-
-	w25q->descriptor.spiChipSelect(w25q, 1);
-
-	id = (rxByte0 << 16) | (rxByte1 << 8) | rxByte2;
-
-	return id;
-}
-
-static void W25Q_WriteEnable(W25Q_st* w25q)
-{
-	w25q->descriptor.spiChipSelect(w25q, 0);
-	W25Q_SendByte(w25q, W25_WRITE_ENABLE);
-	w25q->descriptor.spiChipSelect(w25q, 1);
-	W25Q_Delay(w25q, 1);
-}
-
-//static void W25Q_WriteDisable(W25Q_st* w25q)
-//{
-//	w25q->descriptor.spiChipSelect(w25q, 0);
-//	W25Q_SendByte(w25q, W25_WRITE_DISABLE);
-//	w25q->descriptor.spiChipSelect(w25q, 1);
-//	W25Q_Delay(w25q, 1);
-//}
-
-static void W25Q_WaitForWriteEnd(W25Q_st* w25q)
-{
-	W25Q_Delay(w25q, 1);
-	w25q->descriptor.spiChipSelect(w25q, 0);
-	W25Q_SendByte(w25q, W25_READ_STATUS_1);
-
-	do{
-		w25q->statusRegister1 = W25Q_SendByte(w25q, W25QXX_DUMMY_BYTE);
-		W25Q_Delay(w25q, 1);
-	}
-	while((w25q->statusRegister1 & 0x01) == 0x01);
-
-	w25q->descriptor.spiChipSelect(w25q, 1);
-}
-
-static uint32_t W25Q_SectorToPage(W25Q_st* w25q, uint32_t sectorAddress)
-{
-	return(sectorAddress * w25q->sectorSize) / w25q->pageSize;
-}
-
-static uint32_t W25Q_BlockToPage(W25Q_st* w25q, uint32_t blockAddress)
-{
-	return (blockAddress * w25q->blockSize) / w25q->pageSize;
-}
+#define W25Q_W25Q512_CAPACITY           0x04000000u
+#define W25Q_3_BYTE_ADDRESS_LIMIT       0x01000000u
+#define W25Q_HEADER_MAX_SIZE            10u
+//-----Data-----
 
 
-uint8_t	W25Q_Init(W25Q_st* w25q, W25Q_Descriptor_st* descriptor)
-{
-	w25q->descriptor.spiChipSelect = descriptor->spiChipSelect;
-	w25q->descriptor.spiTransmitReceive = descriptor->spiTransmitReceive;
-	w25q->descriptor.spiTransmit = descriptor->spiTransmit;
-	w25q->descriptor.spiReceive = descriptor->spiReceive;
-	w25q->descriptor.getTick = descriptor->getTick;
 
-	w25q->lock = 1;
+static W25Q_Result_et detectDevice(W25Q_st* _w25q);
+static W25Q_Result_et decodeCapacity(W25Q_st* _w25q, uint8_t _capacityId);
+static W25Q_Result_et erase(W25Q_st* _w25q, uint8_t _command, uint32_t _address, uint8_t _hasAddress, uint32_t _timeout);
+static W25Q_Result_et programPage(W25Q_st* _w25q, uint32_t _address, const uint8_t* _data, uint32_t _size);
+static W25Q_Result_et checkReady(W25Q_st* _w25q);
+static uint8_t        isRangeValid(W25Q_st* _w25q, uint32_t _address, uint32_t _size);
+static W25Q_Result_et waitWhileBusy(W25Q_st* _w25q, uint32_t _timeout);
+static void           delay(W25Q_st* _w25q, uint32_t _time);
+static W25Q_Result_et readStatus(W25Q_st* _w25q, uint8_t _command, uint8_t* _status);
+static W25Q_Result_et sendCommand(W25Q_st* _w25q, uint8_t _command);
+static size_t         buildHeader(W25Q_st* _w25q, uint8_t* _header, uint8_t _command, uint32_t _address, uint8_t _dummySize);
+static W25Q_Result_et transaction(W25Q_st* _w25q, const uint8_t* _header, size_t _headerSize, const uint8_t* _txData, uint8_t* _rxData, size_t _dataSize);
 
-	W25Q_Delay(w25q, 100);
-	w25q->descriptor.spiChipSelect(w25q, 1);
-	W25Q_Delay(w25q, 100);
+W25Q_Result_et W25Q_Init(W25Q_st* _w25q, W25Q_Descriptor_st* _descriptor){
+	_w25q->descriptor = *_descriptor;
 
-	uint32_t id = W25Q_ReadID(w25q);
+	_w25q->model       = W25Q_MODEL_UNKNOWN;
+	_w25q->capacity    = 0;
+	_w25q->addressSize = 3;
 
-	switch(id & 0x0000FFFF)
-	{
-		case 0x401A:	// 	w25q512
-			w25q->id = W25Q512;
-			w25q->blockCount = 1024;
-		break;
-
-		case 0x4019:	// 	w25q256
-			w25q->id = W25Q256;
-			w25q->blockCount = 512;
-		break;
-
-		case 0x4018:	// 	w25q128
-			w25q->id = W25Q128;
-			w25q->blockCount = 256;
-		break;
-
-		case 0x4017:	//	w25q64
-			w25q->id = W25Q64;
-			w25q->blockCount = 128;
-		break;
-
-		case 0x4016:	//	w25q32
-			w25q->id = W25Q32;
-			w25q->blockCount = 64;
-		break;
-
-		case 0x4015:	//	w25q16
-			w25q->id = W25Q16;
-			w25q->blockCount = 32;
-		break;
-
-		case 0x4014:	//	w25q80
-			w25q->id = W25Q80;
-			w25q->blockCount = 16;
-		break;
-
-		case 0x4013:	//	w25q40
-			w25q->id = W25Q40;
-			w25q->blockCount = 8;
-		break;
-
-		case 0x4012:	//	w25q20
-			w25q->id = W25Q20;
-			w25q->blockCount = 4;
-		break;
-
-		case 0x4011:	//	w25q10
-			w25q->id = W25Q10;
-			w25q->blockCount = 2;
-		break;
-
-		default:
-			w25q->lock = 0;
-			return 0;
+	for(uint8_t i = 0; i < W25Q_UNIQUE_ID_SIZE; i++){
+		_w25q->uniqueId[i] = 0;
 	}
 
+	_w25q->descriptor.setChipSelect(_w25q, W25Q_CHIP_SELECT_INACTIVE);
+	delay(_w25q, W25Q_POWER_UP_TIME_MS);
 
-	w25q->pageSize = 256;
-	w25q->sectorSize = 0x1000;
-	w25q->sectorCount = w25q->blockCount * 16;
-	w25q->pageCount = (w25q->sectorCount * w25q->sectorSize) / w25q->pageSize;
-	w25q->blockSize = w25q->sectorSize * 16;
-	w25q->capacityInKiloByte = (w25q->sectorCount * w25q->sectorSize) / 1024;
+	W25Q_Result_et result = sendCommand(_w25q, W25Q_COMMAND_RELEASE_POWER_DOWN);
 
-	w25q->lock = 0;
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	delay(_w25q, W25Q_WAKE_UP_TIME_MS);
+
+	// An erase started before an MCU reset may still be running: the chip ignores ID commands while busy
+	result = waitWhileBusy(_w25q, W25Q_BLOCK_ERASE_TIMEOUT_MS);
+
+	if(result == W25Q_RESULT_ERROR_SPI){
+		return result;
+	}
+
+	result = detectDevice(_w25q);
+
+	if(result != W25Q_RESULT_OK){
+		_w25q->model    = W25Q_MODEL_UNKNOWN;
+		_w25q->capacity = 0;
+	}
+
+	return result;
+}
+
+W25Q_Result_et W25Q_Read(W25Q_st* _w25q, uint32_t _address, uint8_t* _data, uint32_t _size){
+	W25Q_Result_et result = checkReady(_w25q);
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	if((_data == NULL) || (isRangeValid(_w25q, _address, _size) == 0)){
+		return W25Q_RESULT_ERROR_INVALID_ARGUMENT;
+	}
+
+	uint8_t header[W25Q_HEADER_MAX_SIZE];
+	size_t  headerSize = buildHeader(_w25q, header, W25Q_COMMAND_FAST_READ, _address, 1);
+
+	return transaction(_w25q, header, headerSize, NULL, _data, _size);
+}
+
+W25Q_Result_et W25Q_Write(W25Q_st* _w25q, uint32_t _address, const uint8_t* _data, uint32_t _size){
+	W25Q_Result_et result = checkReady(_w25q);
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	if((_data == NULL) || (isRangeValid(_w25q, _address, _size) == 0)){
+		return W25Q_RESULT_ERROR_INVALID_ARGUMENT;
+	}
+
+	while(_size > 0){
+		uint32_t pageRemaining = W25Q_PAGE_SIZE - (_address % W25Q_PAGE_SIZE);
+		uint32_t chunkSize     = (_size < pageRemaining) ? _size : pageRemaining;
+
+		result = programPage(_w25q, _address, _data, chunkSize);
+
+		if(result != W25Q_RESULT_OK){
+			return result;
+		}
+
+		_address += chunkSize;
+		_data    += chunkSize;
+		_size    -= chunkSize;
+	}
+
+	return W25Q_RESULT_OK;
+}
+
+W25Q_Result_et W25Q_EraseSector(W25Q_st* _w25q, uint32_t _sector){
+	W25Q_Result_et result = checkReady(_w25q);
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	if(_sector >= (_w25q->capacity / W25Q_SECTOR_SIZE)){
+		return W25Q_RESULT_ERROR_INVALID_ARGUMENT;
+	}
+
+	return erase(_w25q, W25Q_COMMAND_SECTOR_ERASE, _sector * W25Q_SECTOR_SIZE, 1, W25Q_SECTOR_ERASE_TIMEOUT_MS);
+}
+
+W25Q_Result_et W25Q_EraseBlock(W25Q_st* _w25q, uint32_t _block){
+	W25Q_Result_et result = checkReady(_w25q);
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	if(_block >= (_w25q->capacity / W25Q_BLOCK_SIZE)){
+		return W25Q_RESULT_ERROR_INVALID_ARGUMENT;
+	}
+
+	return erase(_w25q, W25Q_COMMAND_BLOCK_ERASE, _block * W25Q_BLOCK_SIZE, 1, W25Q_BLOCK_ERASE_TIMEOUT_MS);
+}
+
+W25Q_Result_et W25Q_EraseChip(W25Q_st* _w25q){
+	W25Q_Result_et result = checkReady(_w25q);
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	uint32_t timeout = (_w25q->capacity / W25Q_BLOCK_SIZE) * W25Q_CHIP_ERASE_TIMEOUT_PER_BLOCK_MS;
+
+	return erase(_w25q, W25Q_COMMAND_CHIP_ERASE, 0, 0, timeout);
+}
+
+W25Q_Model_et W25Q_GetModel(W25Q_st* _w25q){
+	return _w25q->model;
+}
+
+uint32_t W25Q_GetCapacity(W25Q_st* _w25q){
+	return _w25q->capacity;
+}
+
+W25Q_Result_et W25Q_GetUniqueId(W25Q_st* _w25q, uint8_t* _uniqueId){
+	if(_w25q->capacity == 0){
+		return W25Q_RESULT_ERROR_DEVICE_NOT_FOUND;
+	}
+
+	if(_uniqueId == NULL){
+		return W25Q_RESULT_ERROR_INVALID_ARGUMENT;
+	}
+
+	for(uint8_t i = 0; i < W25Q_UNIQUE_ID_SIZE; i++){
+		_uniqueId[i] = _w25q->uniqueId[i];
+	}
+
+	return W25Q_RESULT_OK;
+}
+
+static W25Q_Result_et detectDevice(W25Q_st* _w25q){
+	uint8_t        header[W25Q_HEADER_MAX_SIZE];
+	uint8_t        jedecId[3] = {0};
+	uint8_t        command    = W25Q_COMMAND_JEDEC_ID;
+	W25Q_Result_et result     = transaction(_w25q, &command, 1, NULL, jedecId, sizeof(jedecId));
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	if(jedecId[0] != W25Q_JEDEC_MANUFACTURER_WINBOND){
+		return W25Q_RESULT_ERROR_DEVICE_NOT_FOUND;
+	}
+
+	if((jedecId[1] != W25Q_JEDEC_TYPE_SPI) && (jedecId[1] != W25Q_JEDEC_TYPE_SPI_1V8) && (jedecId[1] != W25Q_JEDEC_TYPE_SPI_DTR)){
+		return W25Q_RESULT_ERROR_DEVICE_NOT_FOUND;
+	}
+
+	result = decodeCapacity(_w25q, jedecId[2]);
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	_w25q->addressSize = 3;
+
+	if(_w25q->capacity > W25Q_3_BYTE_ADDRESS_LIMIT){
+		uint8_t status = 0;
+
+		result = sendCommand(_w25q, W25Q_COMMAND_ENTER_4_BYTE_MODE);
+
+		if(result == W25Q_RESULT_OK){
+			result = readStatus(_w25q, W25Q_COMMAND_READ_STATUS_3, &status);
+		}
+
+		if(result != W25Q_RESULT_OK){
+			return result;
+		}
+
+		if((status & W25Q_STATUS_3_ADS) == 0){
+			return W25Q_RESULT_ERROR_ADDRESS_MODE;
+		}
+
+		_w25q->addressSize = 4;
+	}
+
+	// Read Unique ID: dummy bytes = address size + 1 (4 in 3-byte mode, 5 in 4-byte mode)
+	size_t headerSize = buildHeader(_w25q, header, W25Q_COMMAND_UNIQUE_ID, 0, 1);
+
+	return transaction(_w25q, header, headerSize, NULL, _w25q->uniqueId, W25Q_UNIQUE_ID_SIZE);
+}
+
+static W25Q_Result_et decodeCapacity(W25Q_st* _w25q, uint8_t _capacityId){
+	// 0x11 (W25Q10) .. 0x19 (W25Q256): capacity = 2^id bytes, models follow W25Q_Model_et order
+	if((_capacityId >= W25Q_JEDEC_CAPACITY_W25Q10) && (_capacityId <= W25Q_JEDEC_CAPACITY_W25Q256)){
+		_w25q->model    = (W25Q_Model_et)(W25Q_MODEL_W25Q10 + (_capacityId - W25Q_JEDEC_CAPACITY_W25Q10));
+		_w25q->capacity = 1ul << _capacityId;
+	}
+	else if(_capacityId == W25Q_JEDEC_CAPACITY_W25Q512){
+		_w25q->model    = W25Q_MODEL_W25Q512;
+		_w25q->capacity = W25Q_W25Q512_CAPACITY;
+	}
+	else{
+		return W25Q_RESULT_ERROR_DEVICE_NOT_FOUND;
+	}
+
+	return W25Q_RESULT_OK;
+}
+
+static W25Q_Result_et erase(W25Q_st* _w25q, uint8_t _command, uint32_t _address, uint8_t _hasAddress, uint32_t _timeout){
+	uint8_t header[W25Q_HEADER_MAX_SIZE];
+	size_t  headerSize = 1;
+
+	if(_hasAddress != 0){
+		headerSize = buildHeader(_w25q, header, _command, _address, 0);
+	}
+	else{
+		header[0] = _command;
+	}
+
+	W25Q_Result_et result = sendCommand(_w25q, W25Q_COMMAND_WRITE_ENABLE);
+
+	if(result == W25Q_RESULT_OK){
+		result = transaction(_w25q, header, headerSize, NULL, NULL, 0);
+	}
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	return waitWhileBusy(_w25q, _timeout);
+}
+
+static W25Q_Result_et programPage(W25Q_st* _w25q, uint32_t _address, const uint8_t* _data, uint32_t _size){
+	uint8_t header[W25Q_HEADER_MAX_SIZE];
+	size_t  headerSize = buildHeader(_w25q, header, W25Q_COMMAND_PAGE_PROGRAM, _address, 0);
+
+	W25Q_Result_et result = sendCommand(_w25q, W25Q_COMMAND_WRITE_ENABLE);
+
+	if(result == W25Q_RESULT_OK){
+		result = transaction(_w25q, header, headerSize, _data, NULL, _size);
+	}
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	return waitWhileBusy(_w25q, W25Q_PAGE_PROGRAM_TIMEOUT_MS);
+}
+
+static W25Q_Result_et checkReady(W25Q_st* _w25q){
+	if(_w25q->capacity == 0){
+		return W25Q_RESULT_ERROR_DEVICE_NOT_FOUND;
+	}
+
+	// The chip may still be busy after a previous timeout
+	uint8_t        status = 0;
+	W25Q_Result_et result = readStatus(_w25q, W25Q_COMMAND_READ_STATUS_1, &status);
+
+	if(result != W25Q_RESULT_OK){
+		return result;
+	}
+
+	if((status & W25Q_STATUS_1_BUSY) != 0){
+		return W25Q_RESULT_BUSY;
+	}
+
+	return W25Q_RESULT_OK;
+}
+
+static uint8_t isRangeValid(W25Q_st* _w25q, uint32_t _address, uint32_t _size){
+	if((_size == 0) || (_address >= _w25q->capacity) || (_size > (_w25q->capacity - _address))){
+		return 0;
+	}
+
 	return 1;
 }
 
-void W25Q_EraseChip(W25Q_st* w25q)
-{
-	while(w25q->lock == 1)
-		W25Q_Delay(w25q, 1);
+static W25Q_Result_et waitWhileBusy(W25Q_st* _w25q, uint32_t _timeout){
+	uint32_t startTime = _w25q->descriptor.getTick();
 
-	w25q->lock = 1;
+	while(1){
+		uint8_t        status      = 0;
+		uint32_t       currentTime = _w25q->descriptor.getTick();
+		W25Q_Result_et result      = readStatus(_w25q, W25Q_COMMAND_READ_STATUS_1, &status);
 
-	W25Q_WriteEnable(w25q);
+		if(result != W25Q_RESULT_OK){
+			return result;
+		}
 
-	w25q->descriptor.spiChipSelect(w25q, 0);
+		if((status & W25Q_STATUS_1_BUSY) == 0){
+			return W25Q_RESULT_OK;
+		}
 
-	W25Q_SendByte(w25q, W25_CHIP_ERASE);
-
-	w25q->descriptor.spiChipSelect(w25q, 1);
-
-	W25Q_WaitForWriteEnd(w25q);
-
-	W25Q_Delay(w25q, 10);
-
-	w25q->lock = 0;
+		// '>' instead of '>=': with a 1 ms tick it guarantees at least _timeout ms
+		if((currentTime - startTime) > _timeout){
+			return W25Q_RESULT_ERROR_TIMEOUT;
+		}
+	}
 }
 
-void W25Q_EraseSector(W25Q_st* w25q, uint32_t sectorAddr)
-{
-	while(w25q->lock == 1)
-		W25Q_Delay(w25q, 1);
+static void delay(W25Q_st* _w25q, uint32_t _time){
+	uint32_t startTime = _w25q->descriptor.getTick();
 
-	w25q->lock = 1;
-
-	W25Q_WaitForWriteEnd(w25q);
-	sectorAddr = sectorAddr * w25q->sectorSize;
-
-	W25Q_WriteEnable(w25q);
-
-	w25q->descriptor.spiChipSelect(w25q, 0);
-
-	W25Q_SendByte(w25q, W25_SECTOR_ERASE);
-
-	if(w25q->id >= W25Q256){
-		W25Q_SendByte(w25q, (sectorAddr & 0xFF000000) >> 24);
+	// '<=' instead of '<': with a 1 ms tick it guarantees at least _time ms
+	while((_w25q->descriptor.getTick() - startTime) <= _time){
 	}
-
-	W25Q_SendByte(w25q, (sectorAddr & 0xFF0000) >> 16);
-	W25Q_SendByte(w25q, (sectorAddr & 0xFF00) >> 8);
-	W25Q_SendByte(w25q, (sectorAddr & 0xFF));
-
-	w25q->descriptor.spiChipSelect(w25q, 1);
-
-	W25Q_WaitForWriteEnd(w25q);
-
-	W25Q_Delay(w25q, 1);
-	w25q->lock = 0;
 }
 
-void W25Q_EraseBlock(W25Q_st* w25q, int32_t blockAddr)
-{
-	while(w25q->lock == 1)
-		W25Q_Delay(w25q, 1);
-
-	w25q->lock = 1;
-
-	W25Q_WaitForWriteEnd(w25q);
-
-	blockAddr = blockAddr * w25q->sectorSize * 16;
-
-	W25Q_WriteEnable(w25q);
-
-	w25q->descriptor.spiChipSelect(w25q, 0);
-
-	W25Q_SendByte(w25q, W25_BLOCK_ERASE);
-
-	if(w25q->id >= W25Q256){
-		W25Q_SendByte(w25q, (blockAddr & 0xFF000000) >> 24);
-	}
-
-	W25Q_SendByte(w25q, (blockAddr & 0xFF0000) >> 16);
-	W25Q_SendByte(w25q, (blockAddr & 0xFF00) >> 8);
-	W25Q_SendByte(w25q, (blockAddr & 0xFF));
-
-	w25q->descriptor.spiChipSelect(w25q, 1);
-
-	W25Q_WaitForWriteEnd(w25q);
-
-	W25Q_Delay(w25q, 1);
-	w25q->lock = 0;
+static W25Q_Result_et readStatus(W25Q_st* _w25q, uint8_t _command, uint8_t* _status){
+	return transaction(_w25q, &_command, 1, NULL, _status, 1);
 }
 
-void W25Q_WriteByte(W25Q_st* w25q, uint8_t byte, uint32_t addr)
-{
-	while(w25q->lock == 1)
-		W25Q_Delay(w25q, 1);
-
-	w25q->lock = 1;
-
-	W25Q_WaitForWriteEnd(w25q);
-	W25Q_WriteEnable(w25q);
-
-	w25q->descriptor.spiChipSelect(w25q, 0);
-
-	W25Q_SendByte(w25q, W25_PAGE_PROGRAMM);
-
-	if(w25q->id >= W25Q256){
-		W25Q_SendByte(w25q, (addr & 0xFF000000) >> 24);
-	}
-
-	W25Q_SendByte(w25q, (addr & 0xFF0000) >> 16);
-	W25Q_SendByte(w25q, (addr & 0xFF00) >> 8);
-	W25Q_SendByte(w25q, (addr & 0xFF));
-
-	W25Q_SendByte(w25q, byte);
-
-	w25q->descriptor.spiChipSelect(w25q, 1);
-
-	W25Q_WaitForWriteEnd(w25q);
-
-	w25q->lock = 0;
+static W25Q_Result_et sendCommand(W25Q_st* _w25q, uint8_t _command){
+	return transaction(_w25q, &_command, 1, NULL, NULL, 0);
 }
 
-void W25Q_WritePage(W25Q_st* w25q, uint8_t *buf, uint32_t pageAddr, uint32_t offset, uint32_t size)
-{
-	while(w25q->lock == 1)
-		W25Q_Delay(w25q, 1);
+static size_t buildHeader(W25Q_st* _w25q, uint8_t* _header, uint8_t _command, uint32_t _address, uint8_t _dummySize){
+	size_t size = 0;
 
-	w25q->lock = 1;
+	_header[size++] = _command;
 
-	if(((size + offset) > w25q->pageSize) || (size == 0))
-		size = w25q->pageSize - offset;
-
-	W25Q_WaitForWriteEnd(w25q);
-	W25Q_WriteEnable(w25q);
-
-	w25q->descriptor.spiChipSelect(w25q, 0);
-
-	W25Q_SendByte(w25q, W25_PAGE_PROGRAMM);
-
-	pageAddr = (pageAddr * w25q->pageSize) + offset;
-
-	if(w25q->id >= W25Q256){
-		W25Q_SendByte(w25q, (pageAddr & 0xFF000000) >> 24);
+	if(_w25q->addressSize == 4){
+		_header[size++] = (uint8_t)(_address >> 24);
 	}
 
-	W25Q_SendByte(w25q, (pageAddr & 0xFF0000) >> 16);
-	W25Q_SendByte(w25q, (pageAddr & 0xFF00) >> 8);
-	W25Q_SendByte(w25q, (pageAddr & 0xFF));
+	_header[size++] = (uint8_t)(_address >> 16);
+	_header[size++] = (uint8_t)(_address >> 8);
+	_header[size++] = (uint8_t)(_address);
 
-	w25q->descriptor.spiTransmit(w25q, buf, size);
+	for(uint8_t i = 0; i < _dummySize; i++){
+		_header[size++] = 0;
+	}
 
-	w25q->descriptor.spiChipSelect(w25q, 1);
-
-	W25Q_WaitForWriteEnd(w25q);
-
-	W25Q_Delay(w25q, 1);
-	w25q->lock = 0;
+	return size;
 }
 
-void W25Q_WriteSector(W25Q_st* w25q, uint8_t *buf, uint32_t sectorAddr, uint32_t offset, uint32_t size)
-{
-	if((size > w25q->sectorSize) || (size == 0))
-		size = w25q->sectorSize;
+static W25Q_Result_et transaction(W25Q_st* _w25q, const uint8_t* _header, size_t _headerSize, const uint8_t* _txData, uint8_t* _rxData, size_t _dataSize){
+	_w25q->descriptor.setChipSelect(_w25q, W25Q_CHIP_SELECT_ACTIVE);
 
-	uint32_t startPage;
-	int32_t	bytesToWrite;
-	uint32_t localOffset;
+	W25Q_Result_et result = _w25q->descriptor.transmit(_w25q, _header, _headerSize);
 
-	if((offset + size) > w25q->sectorSize)
-		bytesToWrite = w25q->sectorSize - offset;
-	else
-		bytesToWrite = size;
-
-	startPage = W25Q_SectorToPage(w25q, sectorAddr) + (offset / w25q->pageSize);
-	localOffset = offset % w25q->pageSize;
-
-	do
-	{
-		W25Q_WritePage(w25q, buf, startPage, localOffset, bytesToWrite);
-		startPage++;
-
-		bytesToWrite -= w25q->pageSize - localOffset;
-		buf += w25q->pageSize - localOffset;
-		localOffset = 0;
-	}
-	while(bytesToWrite > 0);
-}
-
-void W25Q_WriteBlock(W25Q_st* w25q, uint8_t* buf, uint32_t blockAddr, uint32_t offset, uint32_t size)
-{
-	if((size>w25q->blockSize)||(size == 0))
-		size=w25q->blockSize;
-
-	uint32_t	startPage;
-	int32_t		bytesToWrite;
-	uint32_t	localOffset;
-
-	if((offset+size) > w25q->blockSize)
-		bytesToWrite = w25q->blockSize - offset;
-	else
-		bytesToWrite = size;
-
-	startPage = W25Q_BlockToPage(w25q, blockAddr) + (offset/w25q->pageSize);
-
-	localOffset = offset % w25q->pageSize;
-
-	do
-	{
-		W25Q_WritePage(w25q, buf, startPage, localOffset, bytesToWrite);
-		startPage++;
-		bytesToWrite -= w25q->pageSize - localOffset;
-		buf += w25q->pageSize - localOffset;
-		localOffset = 0;
-	}
-	while(bytesToWrite > 0);
-}
-
-void W25Q_ReadByte(W25Q_st* w25q, uint8_t* byte, uint32_t addr)
-{
-	while(w25q->lock==1)
-		W25Q_Delay(w25q, 1);
-
-	w25q->lock=1;
-
-	w25q->descriptor.spiChipSelect(w25q, 0);
-
-	W25Q_SendByte(w25q, W25_FAST_READ);
-
-	if(w25q->id >= W25Q256){
-		W25Q_SendByte(w25q, (addr & 0xFF000000) >> 24);
+	if((result == W25Q_RESULT_OK) && (_txData != NULL)){
+		result = _w25q->descriptor.transmit(_w25q, _txData, _dataSize);
 	}
 
-	W25Q_SendByte(w25q, (addr & 0xFF0000) >> 16);
-	W25Q_SendByte(w25q, (addr & 0xFF00) >> 8);
-	W25Q_SendByte(w25q, (addr & 0xFF));
-
-	W25Q_SendByte(w25q, 0);
-
-	*byte = W25Q_SendByte(w25q, W25QXX_DUMMY_BYTE);
-
-	w25q->descriptor.spiChipSelect(w25q, 1);
-
-	w25q->lock = 0;
-}
-
-void W25Q_ReadPage(W25Q_st* w25q, uint8_t *buf, uint32_t pageAddr, uint32_t offset, uint32_t size)
-{
-	while(w25q->lock==1)
-		W25Q_Delay(w25q, 1);
-
-	w25q->lock = 1;
-
-	if((size > w25q->pageSize) || (size == 0))
-		size = w25q->pageSize;
-
-	if((offset + size) > w25q->pageSize)
-		size = w25q->pageSize - offset;
-
-	pageAddr = pageAddr * w25q->pageSize + offset;
-	w25q->descriptor.spiChipSelect(w25q, 0);
-
-	W25Q_SendByte(w25q, W25_FAST_READ);
-
-	if(w25q->id >= W25Q256){
-		W25Q_SendByte(w25q, (pageAddr & 0xFF000000) >> 24);
+	if((result == W25Q_RESULT_OK) && (_rxData != NULL)){
+		result = _w25q->descriptor.receive(_w25q, _rxData, _dataSize);
 	}
 
-	W25Q_SendByte(w25q, (pageAddr & 0xFF0000) >> 16);
-	W25Q_SendByte(w25q, (pageAddr & 0xFF00) >> 8);
-	W25Q_SendByte(w25q, (pageAddr & 0xFF));
+	_w25q->descriptor.setChipSelect(_w25q, W25Q_CHIP_SELECT_INACTIVE);
 
-	W25Q_SendByte(w25q, 0);
-
-	w25q->descriptor.spiReceive(w25q, buf, size);
-
-	w25q->descriptor.spiChipSelect(w25q, 1);
-
-	W25Q_Delay(w25q, 1);
-	w25q->lock = 0;
-}
-
-void W25Q_ReadSector(W25Q_st* w25q, uint8_t *buf, uint32_t sectorAddr, uint32_t offset, uint32_t size)
-{
-	if((size > w25q->sectorSize) || (size==0))
-		size = w25q->sectorSize;
-
-	uint32_t startPage;
-	int32_t	bytesToRead;
-	uint32_t localOffset;
-
-	if((offset + size) > w25q->sectorSize)
-		bytesToRead = w25q->sectorSize - offset;
-	else
-		bytesToRead = size;
-
-	startPage = W25Q_SectorToPage(w25q, sectorAddr) + (offset / w25q->pageSize);
-
-	localOffset = offset % w25q->pageSize;
-
-	do
-	{
-		W25Q_ReadPage(w25q, buf, startPage, localOffset, bytesToRead);
-		startPage++;
-		bytesToRead -= w25q->pageSize - localOffset;
-		buf += w25q->pageSize - localOffset;
-		localOffset = 0;
-	}
-	while(bytesToRead > 0);
-}
-
-void W25Q_ReadBlock(W25Q_st* w25q, uint8_t* buf, uint32_t blockAddr, uint32_t offset, uint32_t size)
-{
-	if((size > w25q->blockSize) || (size == 0))
-		size = w25q->blockSize;
-
-	uint32_t startPage;
-	int32_t	bytesToRead;
-	uint32_t localOffset;
-
-	if((offset + size) > w25q->blockSize)
-		bytesToRead = w25q->blockSize - offset;
-	else
-		bytesToRead = size;
-
-	startPage = W25Q_BlockToPage(w25q, blockAddr) + (offset / w25q->pageSize);
-
-	localOffset = offset%w25q->pageSize;
-
-	do
-	{
-		W25Q_ReadPage(w25q, buf,startPage,localOffset,bytesToRead);
-		startPage++;
-		bytesToRead -= w25q->pageSize - localOffset;
-		buf += w25q->pageSize - localOffset;
-		localOffset = 0;
-	}
-	while(bytesToRead > 0);
+	return result;
 }

@@ -1,97 +1,93 @@
-#ifndef W25QXX_H_
-#define W25QXX_H_
+#ifndef W25Q_H_
+#define W25Q_H_
 
-#include <stdio.h>
+#include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
-#define W25_WRITE_DISABLE     0x04
-#define W25_WRITE_ENABLE      0x06
-#define W25_CHIP_ERASE        0xC7 //0x60
-#define W25_SECTOR_ERASE      0x20
-#define W25_BLOCK_ERASE       0xD8
-#define W25_FAST_READ         0x0B
-#define W25_PAGE_PROGRAMM     0x02
-#define W25_GET_JEDEC_ID      0x9F
-#define W25_READ_STATUS_1     0x05
-#define W25_READ_STATUS_2     0x35
-#define W25_READ_STATUS_3     0x15
-#define W25_WRITE_STATUS_1    0x01
-#define W25_WRITE_STATUS_2    0x31
-#define W25_WRITE_STATUS_3    0x11
-#define W25_READ_UNIQUE_ID    0x4B
+#define W25Q_PAGE_SIZE                       256u
+#define W25Q_SECTOR_SIZE                     4096u
+#define W25Q_BLOCK_SIZE                      65536u
+#define W25Q_UNIQUE_ID_SIZE                  8u
 
-typedef enum W25Q_ID_e W25Q_ID_et;
+#define W25Q_POWER_UP_TIME_MS                10u
+#define W25Q_WAKE_UP_TIME_MS                 1u
+#define W25Q_PAGE_PROGRAM_TIMEOUT_MS         10u
+#define W25Q_SECTOR_ERASE_TIMEOUT_MS         1000u
+#define W25Q_BLOCK_ERASE_TIMEOUT_MS          4000u
+#define W25Q_CHIP_ERASE_TIMEOUT_PER_BLOCK_MS 2000u
 
-typedef struct W25Q             W25Q_st;
-typedef struct W25Q_Descriptor  W25Q_Descriptor_st;
-
-typedef void (*W25Q_SPI_ChipSelect)      (W25Q_st* w25q, uint8_t level);
-typedef void (*W25Q_SPI_TransmitReceive) (W25Q_st* w25q, uint8_t* txBuf, uint8_t* rxBuf, size_t size);
-typedef void (*W25Q_SPI_Transmit)        (W25Q_st* w25q, uint8_t* txBuf, size_t size);
-typedef void (*W25Q_SPI_Receive)         (W25Q_st* w25q, uint8_t* rxBuf, size_t size);
-typedef uint32_t (*W25Q_GetTick)         ();
-
-enum W25Q_ID_e
-{
-	W25Q10 = 1,
-	W25Q20,
-	W25Q40,
-	W25Q80,
-	W25Q16,
-	W25Q32,
-	W25Q64,
-	W25Q128,
-	W25Q256,
-	W25Q512,
+enum W25Q_Result{
+	W25Q_RESULT_OK = 0,
+	W25Q_RESULT_BUSY,
+	W25Q_RESULT_ERROR_INVALID_ARGUMENT,
+	W25Q_RESULT_ERROR_TIMEOUT,
+	W25Q_RESULT_ERROR_SPI,
+	W25Q_RESULT_ERROR_DEVICE_NOT_FOUND,
+	W25Q_RESULT_ERROR_ADDRESS_MODE
 };
 
-struct W25Q_Descriptor
-{
-	W25Q_SPI_ChipSelect spiChipSelect;
-	W25Q_SPI_TransmitReceive spiTransmitReceive;
-	W25Q_SPI_Transmit spiTransmit;
-	W25Q_SPI_Receive spiReceive;
-	W25Q_GetTick getTick;
+enum W25Q_Model{
+	W25Q_MODEL_UNKNOWN = 0,
+	W25Q_MODEL_W25Q10,
+	W25Q_MODEL_W25Q20,
+	W25Q_MODEL_W25Q40,
+	W25Q_MODEL_W25Q80,
+	W25Q_MODEL_W25Q16,
+	W25Q_MODEL_W25Q32,
+	W25Q_MODEL_W25Q64,
+	W25Q_MODEL_W25Q128,
+	W25Q_MODEL_W25Q256,
+	W25Q_MODEL_W25Q512
 };
 
-struct W25Q
-{
+enum W25Q_ChipSelect{
+	W25Q_CHIP_SELECT_INACTIVE,
+	W25Q_CHIP_SELECT_ACTIVE
+};
+
+typedef enum W25Q_Result     W25Q_Result_et;
+typedef enum W25Q_Model      W25Q_Model_et;
+typedef enum W25Q_ChipSelect W25Q_ChipSelect_et;
+
+typedef struct W25Q_Descriptor W25Q_Descriptor_st;
+typedef struct W25Q            W25Q_st;
+
+typedef void           (*W25Q_SetChipSelect)(W25Q_st* _w25q, W25Q_ChipSelect_et _state);
+typedef W25Q_Result_et (*W25Q_Transmit)(W25Q_st* _w25q, const uint8_t* _data, size_t _size);
+typedef W25Q_Result_et (*W25Q_Receive)(W25Q_st* _w25q, uint8_t* _data, size_t _size);
+typedef uint32_t       (*W25Q_GetTick)(void);
+
+struct W25Q_Descriptor{
+	W25Q_SetChipSelect setChipSelect;
+	W25Q_Transmit      transmit;
+	W25Q_Receive       receive;
+	W25Q_GetTick       getTick;
+};
+
+struct W25Q{
 	W25Q_Descriptor_st descriptor;
-	W25Q_ID_et id;
-	uint8_t		uniqID[8];
-	uint16_t	pageSize;
-	uint32_t	pageCount;
-	uint32_t	sectorSize;
-	uint32_t	sectorCount;
-	uint32_t	blockSize;
-	uint32_t	blockCount;
-	uint32_t	capacityInKiloByte;
-	uint8_t		statusRegister1;
-	uint8_t		statusRegister2;
-	uint8_t		statusRegister3;
-	uint8_t		lock;
+
+	W25Q_Model_et      model;
+	uint32_t           capacity;
+	uint8_t            addressSize;
+	uint8_t            uniqueId[W25Q_UNIQUE_ID_SIZE];
 };
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-uint8_t	W25Q_Init(W25Q_st* w25q, W25Q_Descriptor_st* descriptor);
+W25Q_Result_et W25Q_Init(W25Q_st* _w25q, W25Q_Descriptor_st* _descriptor);
 
-void W25Q_EraseChip(W25Q_st* w25q);
-void W25Q_EraseSector(W25Q_st* w25q, uint32_t sectorAddr);
-void W25Q_EraseBlock(W25Q_st* w25q, int32_t blockAddr);
+W25Q_Result_et W25Q_Read(W25Q_st* _w25q, uint32_t _address, uint8_t* _data, uint32_t _size);
+W25Q_Result_et W25Q_Write(W25Q_st* _w25q, uint32_t _address, const uint8_t* _data, uint32_t _size);
+W25Q_Result_et W25Q_EraseSector(W25Q_st* _w25q, uint32_t _sector);
+W25Q_Result_et W25Q_EraseBlock(W25Q_st* _w25q, uint32_t _block);
+W25Q_Result_et W25Q_EraseChip(W25Q_st* _w25q);
 
-void W25Q_WriteByte(W25Q_st* w25q, uint8_t byte, uint32_t addr);
-void W25Q_WritePage(W25Q_st* w25q, uint8_t *buf, uint32_t pageAddr, uint32_t offset, uint32_t size);
-void W25Q_WriteSector(W25Q_st* w25q, uint8_t *buf, uint32_t sectorAddr, uint32_t offset, uint32_t size);
-void W25Q_WriteBlock(W25Q_st* w25q, uint8_t* buf, uint32_t blockAddr, uint32_t offset, uint32_t size);
-
-void W25Q_ReadByte(W25Q_st* w25q, uint8_t* byte, uint32_t addr);
-void W25Q_ReadPage(W25Q_st* w25q, uint8_t *buf, uint32_t pageAddr, uint32_t offset, uint32_t size);
-void W25Q_ReadSector(W25Q_st* w25q, uint8_t *buf, uint32_t sectorAddr, uint32_t offset, uint32_t size);
-void W25Q_ReadBlock(W25Q_st* w25q, uint8_t* buf, uint32_t blockAddr, uint32_t offset, uint32_t size);
+W25Q_Model_et  W25Q_GetModel(W25Q_st* _w25q);
+uint32_t       W25Q_GetCapacity(W25Q_st* _w25q);
+W25Q_Result_et W25Q_GetUniqueId(W25Q_st* _w25q, uint8_t* _uniqueId);
 
 #ifdef __cplusplus
 }
